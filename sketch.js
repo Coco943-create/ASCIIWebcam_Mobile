@@ -14,12 +14,15 @@ let cols, rows;
 let charW = 6;
 let charH = 12;
 
+// Camera orientation fixes (mobile)
+let mirrorX = true;   // front camera usually feels correct mirrored
+let flipY = false;    // set true if your phone shows upside-down
+
 // State
-let started = false;        // camera running
-let transitioning = false;  // ripple reveal running
+let started = false; // camera running
 
 // Start button typing
-let startWord = 'BEGIN';
+let startWord = 'begin';
 let startTyped = 0;
 let startLastType = 0;
 let typeInterval = 140;
@@ -43,7 +46,7 @@ let waveOffset = 0;
 // Ripple transition
 let rippleActive = false;
 let rippleStartAt = 0;
-let rippleDuration = 900; // ms
+let rippleDuration = 1600; // ms (slow enough to see)
 let rippleCx = 0;
 let rippleCy = 0;
 
@@ -58,7 +61,6 @@ function draw() {
   updateGrid();
 
   if (!started) {
-    // Always render waves; if rippleActive, distort them with a uniform radial ripple
     drawOrganicWavesWithRipple();
     animateStartButton();
     return;
@@ -77,10 +79,13 @@ function draw() {
   let output = '';
 
   for (let y = 0; y < rows; y++) {
-    const sy = Math.floor(crop.sy + (y / (rows - 1 || 1)) * (crop.sh - 1));
+    let sy = Math.floor(crop.sy + (y / (rows - 1 || 1)) * (crop.sh - 1));
+    if (flipY) sy = crop.sy + (crop.sh - 1) - (sy - crop.sy);
 
     for (let x = 0; x < cols; x++) {
-      const sx = Math.floor(crop.sx + (x / (cols - 1 || 1)) * (crop.sw - 1));
+      let sx = Math.floor(crop.sx + (x / (cols - 1 || 1)) * (crop.sw - 1));
+      if (mirrorX) sx = crop.sx + (crop.sw - 1) - (sx - crop.sx);
+
       const i = (sx + sy * video.width) * 4;
 
       const r = video.pixels[i + 0];
@@ -106,55 +111,50 @@ function drawOrganicWavesWithRipple() {
 
   const now = millis();
   let t = 0;
+
   if (rippleActive) {
     t = constrain((now - rippleStartAt) / rippleDuration, 0, 1);
     if (t >= 1) {
       rippleActive = false;
-      // Reveal camera after ripple completes
       startCameraNow();
     }
   }
 
-  // ripple radius grows from 0 to max diagonal
   const maxR = Math.sqrt(cols * cols + rows * rows);
   const rippleR = t * maxR;
 
-  // Ripple “ring” thickness (in grid units)
-  const ringWidth = 2.2;
-
-  // Ripple strength (how much it distorts)
-  const strength = 3.2 * (1 - t); // fades out as it expands
+  // Visible ripple settings
+  const ringWidth = 6.0;
+  const pushStrength = 7.0;
+  const ringContrast = 0.55;
 
   let output = '';
 
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
-      // Base domain warp for organic non-repeating feel
+      // Base domain warp for organic, less repetitive waves
       const wx = (noise(x * 0.03, y * 0.03, waveOffset) - 0.5) * 6.0;
       const wy = (noise(x * 0.03, y * 0.03, waveOffset + 10.0) - 0.5) * 6.0;
 
       let xx = x + wx;
       let yy = y + wy;
 
-      // Apply a uniform radial ripple distortion around the click point
+      let ringAmt = 0;
+
       if (rippleActive) {
         const dx = x - rippleCx;
         const dy = y - rippleCy;
         const d = Math.sqrt(dx * dx + dy * dy) + 0.0001;
 
-        // How close this cell is to the expanding ring
         const ringDist = Math.abs(d - rippleR);
+        ringAmt = smoothstep(ringWidth, 0, ringDist);
 
-        // A smooth pulse at the ring: 1 at ring centre, 0 away from it
-        const pulse = smoothstep(ringWidth, 0, ringDist);
-
-        // Direction away from click centre
         const nx = dx / d;
         const ny = dy / d;
 
-        // Offset cells outward as the ring passes (water drop feel)
-        xx += nx * pulse * strength;
-        yy += ny * pulse * strength;
+        const fade = (1 - t);
+        xx += nx * ringAmt * pushStrength * fade;
+        yy += ny * ringAmt * pushStrength * fade;
       }
 
       const n1 = noise(xx * 0.06, yy * 0.06, waveOffset);
@@ -162,6 +162,15 @@ function drawOrganicWavesWithRipple() {
       const n3 = noise(xx * 0.22, yy * 0.22, waveOffset * 2.1);
 
       let n = (n1 * 0.62) + (n2 * 0.28) + (n3 * 0.10);
+
+      // Make the ring visibly “water-like”
+      if (rippleActive) {
+        const dx = x - rippleCx;
+        const dy = y - rippleCy;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        const wave = (Math.sin((d - rippleR) * 1.25) * 0.5 + 0.5);
+        n = constrain(n + ringAmt * ringContrast * wave, 0, 1);
+      }
 
       const idx = Math.floor(map(n, 0, 1, 0, chars.length - 1));
       const c = chars.charAt(idx);
@@ -175,7 +184,6 @@ function drawOrganicWavesWithRipple() {
 }
 
 function smoothstep(edge0, edge1, x) {
-  // Smoothly interpolate from 0 to 1 as x goes from edge0 to edge1
   const t = constrain((x - edge0) / (edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
 }
@@ -219,6 +227,11 @@ function setupVideo() {
     () => {}
   );
 
+  // Stabilise sampling buffer and iOS behaviour
+  video.size(640, 480);
+  video.elt.setAttribute('playsinline', '');
+  video.elt.setAttribute('webkit-playsinline', '');
+
   video.hide();
 }
 
@@ -226,7 +239,6 @@ function startCameraNow() {
   if (started) return;
   started = true;
 
-  // remove button when camera begins
   if (startDiv) startDiv.remove();
 
   setupVideo();
@@ -252,8 +264,7 @@ function createStartButton() {
   startDiv.style('cursor', 'pointer');
   startDiv.style('user-select', 'none');
 
-  // Click triggers ripple (camera starts when ripple completes)
-  startDiv.mousePressed(() => triggerRippleAtCentre());
+  startDiv.mousePressed(triggerRippleFromClick);
 }
 
 function animateStartButton() {
@@ -274,13 +285,9 @@ function animateStartButton() {
   startDiv.html('/' + text + cursor);
 }
 
-// Trigger a uniform ripple from where the user clicked.
-// We use the click location relative to the screen, mapped into the ASCII grid.
-function triggerRippleAtCentre() {
+function triggerRippleFromClick() {
   if (rippleActive || started) return;
 
-  // If the user clicks the button, use their click position as the ripple origin.
-  // If we can’t read mouseX/mouseY cleanly, fall back to centre.
   const mx = (typeof mouseX === 'number') ? mouseX : windowWidth * 0.5;
   const my = (typeof mouseY === 'number') ? mouseY : windowHeight * 0.5;
 
